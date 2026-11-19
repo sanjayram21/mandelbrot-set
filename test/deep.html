@@ -1,0 +1,14 @@
+<!doctype html><meta charset=utf-8><title>deep</title><body>
+<!-- Opens index.html already zoomed to #cx,cy,scale, for headless deep shots. -->
+<iframe id="f" width="800" height="600" style="border:0"></iframe>
+<script>
+const [cx, cy, scale] = (location.hash.slice(1) || "-0.743643887037151,0.13182590420533,1e-7")
+  .split(",").map(Number);
+const f = document.getElementById("f");
+f.src = "/index.html";
+f.onload = () => {
+  const S = f.contentWindow.S;
+  S.cx = cx; S.cy = cy; S.scale = scale;
+  f.contentWindow.lastChange = -1e9;
+};
+</script>

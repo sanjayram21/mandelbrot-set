@@ -1,0 +1,13 @@
+<!doctype html><meta charset=utf-8><title>selfcheck</title><body><script>
+// Runs index.html and reports its console.assert failures in the title.
+const f = document.createElement("iframe");
+f.width = 400; f.height = 300;
+f.src = "/index.html?cb=" + Math.random();
+document.body.append(f);
+f.onload = () => {
+  setTimeout(() => {
+    const e = f.contentWindow.__checkFailures || ["no result"];
+    document.title = e.length ? "FAIL: " + e.join(" | ") : "PASS " + JSON.stringify(f.contentWindow.__checkAgree);
+  }, 30000);
+};
+</script>

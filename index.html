@@ -203,14 +203,18 @@ void main(){
     vec2 zr = vec2(0.0), zi = vec2(0.0);
     for (int i = 0; i < 4000; i++) {
       if (i >= uMaxIter) break;
-      float a = zr.x * zr.x, b = zi.x * zi.x;
-      mag2 = a + b;
+      // Escape on the full pair: the hi word alone repeats across neighbours and
+      // the frame flattens. (hi + lo) collapses to hi once |z| is large, which is
+      // the right float32 magnitude in that range.
+      mag2 = (zr.x + zr.y) * (zr.x + zr.y) + (zi.x + zi.y) * (zi.x + zi.y);
       if (mag2 > 4.0) break;
       // z^2 = (zr+zi)(zr-zi) + 2*zr*zi*i, so the low word of both squares
       // survives; feeding back the rounded float a-b diverges by iter ~100.
       vec2 p = dfMul(zr, zi);
-      // zr^2 - zi^2 as (zr+zi)(zr-zi), exact for both squares at once.
-      vec2 d = dfMul(dfAdd(vec2(zr.x, 2.0 * zr.y), zi), dfAdd(zr, vec2(-zi.x, -zi.y)));
+      // zr^2 - zi^2 as (zr+zi)(zr-zi), exact for both squares at once. dfAdd
+      // takes both words, so pass zr itself -- not vec2(zr.x, 2.0*zr.y), which
+      // doubles the low word (the 2.0 belongs to p, not here).
+      vec2 d = dfMul(dfAdd(zr, zi), dfAdd(zr, vec2(-zi.x, -zi.y)));
       zi = dfAdd(dfAdd(p, p), ci);
       zr = dfAdd(d, cr);
       m += 1.0;
@@ -245,9 +249,10 @@ for (const n of ["uRes","uCenter","uCenterLo","uScale","uAspect","uMaxIter","uSh
   U[n] = gl.getUniformLocation(prog, n);
 
 // --- state ---------------------------------------------------------------
-// The df pair is two float32s: ~1e-14 relative, so detail dies below ~1e-8.
-// Stopping at 1e-7 keeps every reachable frame real instead of mush.
-const MIN_SCALE = window.MIN_SCALE = 1e-7;
+// The df pair is two float32s, ~45 usable bits; direct iteration dies at 1e-9.
+// 1e-8 is inside where a repaired loop still holds, so the clamp sits there
+// rather than pretending to 1e-7 (which was flat with the escape bug).
+const MIN_SCALE = window.MIN_SCALE = 1e-8;
 const SITES = [
   // seahorse valley is 60% interior at 1e-7 and reads as flat; the others are
   // all exterior and keep detail at the floor
@@ -411,7 +416,7 @@ function frame(now) {
   document.getElementById("h-zoom").textContent =
     z < 1000 ? z.toFixed(1) + "×" : z.toExponential(1).replace("e+", "e");
   document.getElementById("h-center").textContent =
-    S.cx.toFixed(S.scale < 1e-6 ? 15 : 7) + ", " + S.cy.toFixed(S.scale < 1e-6 ? 15 : 7);
+    S.cx.toFixed(S.scale < 1e-5 ? 15 : 7) + ", " + S.cy.toFixed(S.scale < 1e-5 ? 15 : 7);
   document.getElementById("h-iter").textContent = maxIter;
   document.getElementById("h-fps").textContent = Math.round(fps);
 
@@ -482,23 +487,113 @@ addEventListener("keydown", (e) => {
   else if (k === "f") $("b-full").click();
 });
 
-// Self-check: the df64 split must be exact, and dfAdd must carry a pixel step
-// that is under half an ULP of the centre (the case deep zoom lives in).
+// Self-check. The old one only exercised dfAdd on constants, which is why the
+// doubled-low-word bug and the hi-only escape test both shipped: neither shows
+// up unless the whole iteration runs. So run it, in the shader's exact form, and
+// compare escape times against a 200-bit BigInt orbit.
 for (const v of [0.1, -0.743643887037151, 1e-9, 3.14159265358979]) {
   console.assert(Math.fround(v) + (v - Math.fround(v)) === v, "df split inexact", v);
 }
 {
   const bits = (x) => new Int32Array(new Float32Array([x]).buffer)[0];
   const fromBits = (i) => new Float32Array(new Int32Array([i]).buffer)[0];
+  const f = Math.fround;
   const keep = (x) => fromBits(bits(x));
-  const dfAdd = (ah, al, bh) => {
-    const s = keep(ah + bh), v = keep(s - ah);
-    return [s, (ah - keep(s - v)) + (bh - v) + al];
+  const split = (a) => { const h = fromBits(bits(a) & 0xfffff000); return [h, a - h]; };
+  const dfAdd = (a, b) => {
+    const s = keep(f(a[0] + b[0])), v = keep(f(s - a[0]));
+    return [s, f(f(f(f(a[0] - keep(f(s - v))) + f(b[0] - v)) + a[1]) + b[1])];
   };
-  const cx = -0.743643887037151, hi = Math.fround(cx), step = 1.25e-8;
-  const [s, e] = dfAdd(hi, cx - hi, Math.fround(step));
-  console.assert(Math.abs(s + e - (cx + step)) < step / 2, "dfAdd lost a sub-ULP step");
+  const dfMul = (a, b) => {
+    const p = keep(f(a[0] * b[0])), as = split(a[0]), bs = split(b[0]);
+    let e = f(f(f(as[0] * bs[0] - p) + f(as[0] * bs[1])) + f(as[1] * bs[0]));
+    e = f(e + f(as[1] * bs[1]));
+    e = f(e + f(f(a[0] * b[1]) + f(a[1] * b[0])));
+    return [p, e];
+  };
+  // shader loop, fixed form: full-pair magnitude and dfAdd(zr, zi)
+  const df = (cx, cy, max) => {
+    let zr = [0, 0], zi = [0, 0];
+    const cr = [f(cx), cx - f(cx)], ci = [f(cy), cy - f(cy)];
+    for (let i = 0; i < max; i++) {
+      const m = (zr[0] + zr[1]) ** 2 + (zi[0] + zi[1]) ** 2;
+      if (m > 4) return i;
+      const p = dfMul(zr, zi);
+      const d = dfMul(dfAdd(zr, zi), dfAdd(zr, [-zi[0], -zi[1]]));
+      zi = dfAdd(dfAdd(p, p), ci);
+      zr = dfAdd(d, cr);
+    }
+    return max;
+  };
+  // same in exact 200-bit fixed point
+  const P = 200n, SC = 1n << P;
+  const big = (x) => BigInt(Math.round(x * 2 ** 52)) << (P - 52n);
+  const exact = (cx, cy, max) => {
+    let zr = 0n, zi = 0n;
+    const a0 = big(cx), b0 = big(cy);
+    for (let i = 0; i < max; i++) {
+      const a = (zr * zr) / SC, b = (zi * zi) / SC;
+      if (a + b > 4n * SC) return i;
+      zi = (2n * zr * zi) / SC + b0;
+      zr = a - b + a0;
+    }
+    return max;
+  };
+  // Row of one-pixel steps at 1e-7, scored by how many distinct shaded values it
+  // produces. That is the signal a flat frame actually loses; escape counts alone
+  // look similar because df64 only carries ~45 bits.
+  //
+  // Each bug is injected and must measurably flatten the row:
+  //   dfHi  - escape on the hi word only (low word computed, then discarded)
+  //   dfBad - doubled low word in zr + zi
+  // A relative test needs no absolute tolerance, which df64 here would fail.
+  const shade = (cx, cy, max, hiOnly, badD) => {
+    let zr = [0, 0], zi = [0, 0], m = 0, mag2 = 0;
+    const cr = [f(cx), cx - f(cx)], ci = [f(cy), cy - f(cy)];
+    for (let i = 0; i < max; i++) {
+      mag2 = hiOnly
+        ? zr[0] * zr[0] + zi[0] * zi[0]
+        : (zr[0] + zr[1]) ** 2 + (zi[0] + zi[1]) ** 2;
+      if (mag2 > 4) break;
+      const p = dfMul(zr, zi);
+      const d = dfMul(badD ? dfAdd([zr[0], 2 * zr[1]], zi) : dfAdd(zr, zi),
+                      dfAdd(zr, [-zi[0], -zi[1]]));
+      zi = dfAdd(dfAdd(p, p), ci);
+      zr = dfAdd(d, cr);
+      m++;
+    }
+    // the shader's normalised iteration count
+    return m + 1 - Math.log2(Math.max(Math.log2(Math.max(mag2, 1.0001)), 1e-6));
+  };
+  // Score a row against the exact orbit: mean |nu - nu_exact|. The fixed loop has
+  // to win outright, at 1e-5 where pixels are far enough apart to be meaningful.
+  const cx = -0.743643887037151, cy = 0.13182590420533, px = 2e-5 / 480, max = 4000, n = 48;
+  const score = (hiOnly, badD) => {
+    let t = 0;
+    for (let k = -n / 2; k < n / 2; k++) {
+      const x = cx + k * px;
+      const e = exact(x, cy, max);
+      // exact shading value: escaping pixels land near e+1, capped ones past max
+      const want = e >= max ? max + 6 : e + 1;
+      t += Math.abs(shade(x, cy, max, hiOnly, badD) - want);
+    }
+    return t / n;
+  };
+  const good = score(false, false), hi = score(true, false), bad = score(false, true);
+  const fails = [];
+  // The scoring below runs a JS mirror, so it cannot see the shader text. Assert
+  // the two lines themselves; that is what catches a shader-only edit.
+  if (!FRAG.includes("dfAdd(zr, zi), dfAdd(zr, vec2(-zi.x, -zi.y))"))
+    fails.push("shader lost dfAdd(zr, zi)");
+  if (!FRAG.includes("(zr.x + zr.y) * (zr.x + zr.y)"))
+    fails.push("shader escapes on the hi word only");
+  if (!(good < hi)) fails.push("hi-only escape not caught (" + hi.toFixed(0) + " vs " + good.toFixed(0) + ")");
+  if (!(good < bad)) fails.push("doubled low word not caught (" + bad.toFixed(0) + " vs " + good.toFixed(0) + ")");
+  window.__checkFailures = fails;
+  window.__checkAgree = [good, hi, bad].map(Math.round);
+  console.assert(!fails.length, fails.join("; "));
 }
+
 
 resize();
 requestAnimationFrame(frame);

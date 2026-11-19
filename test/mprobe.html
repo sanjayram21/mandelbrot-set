@@ -1,0 +1,515 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Mandelbrot</title>
+<style>
+  :root{
+    --bg:#07090c; --ink:#e8edf2; --dim:#7d8894; --line:#1b222b;
+    --accent:#ffb454; --panel:rgba(10,13,17,.72);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--ink);
+    font:13px/1.4 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+    -webkit-font-smoothing:antialiased;overscroll-behavior:none}
+  canvas{position:fixed;inset:0;width:100%;height:100%;display:block;cursor:grab;touch-action:none}
+  canvas.drag{cursor:grabbing}
+
+  #hud{position:fixed;top:0;left:0;padding:16px 18px;pointer-events:none;
+    font:11px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--dim);
+    text-shadow:0 1px 6px #000;letter-spacing:.02em}
+  #hud b{color:var(--ink);font-weight:500}
+  #hud .k{color:#4d5763;display:inline-block;min-width:74px}
+
+  #panel{position:fixed;left:16px;bottom:16px;width:268px;padding:14px;
+    background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    backdrop-filter:blur(14px) saturate(1.3);-webkit-backdrop-filter:blur(14px) saturate(1.3);
+    box-shadow:0 12px 40px rgba(0,0,0,.55)}
+  #panel[hidden],#hud[hidden]{display:none}
+
+  .row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 0 5px}
+  .row label{color:var(--dim);font-size:11px;letter-spacing:.04em;text-transform:uppercase}
+  .row output{font:11px ui-monospace,Menlo,monospace;color:var(--accent);font-variant-numeric:tabular-nums}
+
+  input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:18px;background:none;margin:0 0 10px;display:block}
+  input[type=range]::-webkit-slider-runnable-track{height:2px;background:var(--line);border-radius:2px}
+  input[type=range]::-moz-range-track{height:2px;background:var(--line);border-radius:2px}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;margin-top:-5px;
+    border-radius:50%;background:var(--accent);border:0;cursor:pointer;box-shadow:0 0 0 3px rgba(255,180,84,.15)}
+  input[type=range]::-moz-range-thumb{width:12px;height:12px;border:0;border-radius:50%;background:var(--accent);cursor:pointer}
+  input[type=range]:focus-visible::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(255,180,84,.3)}
+
+  .btns{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:12px}
+  button{font:inherit;font-size:11px;letter-spacing:.03em;color:var(--ink);background:#141a21;
+    border:1px solid var(--line);border-radius:7px;padding:7px 4px;cursor:pointer;transition:background .12s,border-color .12s}
+  button:hover{background:#1c242e;border-color:#2b3541}
+  button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+  button[aria-pressed=true]{background:var(--accent);border-color:var(--accent);color:#0b0d10;font-weight:600}
+
+  #swatch{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:10px}
+  #swatch button{height:22px;border-radius:6px;padding:0}
+  #swatch button[aria-pressed=true]{outline:2px solid var(--ink);outline-offset:1px}
+
+  /* display:grid beats the hidden attribute's display:none, so it needs the guard */
+  #err:not([hidden]){position:fixed;inset:0;display:grid;place-content:center;text-align:center;padding:24px;color:var(--dim)}
+  @media (max-width:560px){#panel{left:8px;right:8px;bottom:8px;width:auto}}
+</style>
+</head>
+<body>
+<canvas id="c" aria-label="Mandelbrot set viewport"></canvas>
+
+<div id="hud" role="status" aria-live="off">
+  <div><span class="k">zoom</span><b id="h-zoom">1×</b></div>
+  <div><span class="k">center</span><b id="h-center">0, 0</b></div>
+  <div><span class="k">iter</span><b id="h-iter">0</b></div>
+  <div><span class="k">fps</span><b id="h-fps">0</b></div>
+</div>
+
+<div id="panel">
+  <div class="row"><label for="s-iter">Iterations</label><output id="o-iter">128</output></div>
+  <input id="s-iter" type="range" min="32" max="1200" step="8" value="128">
+
+  <div class="row"><label for="s-speed">Zoom speed</label><output id="o-speed">1.0×</output></div>
+  <input id="s-speed" type="range" min="0.1" max="3" step="0.1" value="1">
+
+  <div class="row"><label for="s-shift">Color drift</label><output id="o-shift">0.00</output></div>
+  <input id="s-shift" type="range" min="0" max="1" step="0.01" value="0.25">
+
+  <div id="swatch" role="group" aria-label="Palette">
+    <button data-p="0" aria-pressed="true" aria-label="Amber" style="background:linear-gradient(90deg,#2b1a05,#ffb454,#2b6f7a)"></button>
+    <button data-p="1" aria-pressed="false" aria-label="Abyss" style="background:linear-gradient(90deg,#0a1430,#4f7fd6,#e8c86a)"></button>
+    <button data-p="2" aria-pressed="false" aria-label="Mono" style="background:linear-gradient(90deg,#0b0b0b,#9aa4ae,#f2f5f8)"></button>
+    <button data-p="3" aria-pressed="false" aria-label="Ember" style="background:linear-gradient(90deg,#1a0a06,#d1442a,#ffd08a)"></button>
+  </div>
+
+  <div class="btns">
+    <button id="b-play" aria-pressed="false">Play</button>
+    <button id="b-jump">Jump</button>
+    <button id="b-reset">Reset</button>
+  </div>
+  <div class="btns" style="grid-template-columns:1fr 1fr">
+    <button id="b-full">Fullscreen</button>
+    <button id="b-hide">Hide UI</button>
+  </div>
+</div>
+
+<div id="err" hidden></div>
+
+<script>
+"use strict";
+
+const canvas = document.getElementById("c");
+const gl = canvas.getContext("webgl2", { antialias:false, depth:false, stencil:false,
+  powerPreference:"high-performance", preserveDrawingBuffer:false });
+
+if (!gl) {
+  const e = document.getElementById("err");
+  e.hidden = false;
+  e.textContent = "WebGL2 is required and unavailable in this browser.";
+  throw new Error("no webgl2");
+}
+
+const VERT = `#version 300 es
+void main(){
+  vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}`;
+
+// Iteration runs in float32 until pixels collide, then switches to double-float
+// (df64) pairs. GLSL ES 3.00 has no fma, so two-product uses Veltkamp splitting.
+const FRAG = `#version 300 es
+precision highp float;
+precision highp int;
+out vec4 fragColor;
+
+uniform vec2  uRes;
+uniform vec2  uCenter;      // hi part
+uniform vec2  uCenterLo;    // lo part
+uniform float uScale;       // view half-height, complex units
+uniform float uAspect;
+uniform int   uMaxIter;
+uniform float uShift;
+uniform int   uPalette;
+uniform int   uDeep;
+
+const float SPLIT = 4097.0;  // unused by the mask split, kept for reference
+
+// Mask the low 12 mantissa bits. A Dekker split written as t-(t-a) gets
+// reassociated to plain a by the GLSL compiler and the low word silently becomes 0.
+vec2 split(float a){ float hi = intBitsToFloat(floatBitsToInt(a) & 0xFFFFF000); return vec2(hi, a - hi); }
+// Two-sum without the (s - a) identity: compilers rewrite b - (s - a) to 0,
+// which silently drops the whole low word. as.x + bs.x is exact, so its
+// difference from s is the rounding error, and the low parts are added after.
+// Bitcast barriers: the compiler folds each error term to 0 without them.
+// Knuth two-sum, not the split form: when the pixel step is under half an ULP of
+// the centre the split form drops it whole (2e-12 for a 1.25e-8 step) and deep
+// frames come out flat. Knuth keeps it in b.x - v.
+float keep(float x){ return intBitsToFloat(floatBitsToInt(x)); }
+vec2 dfAdd(vec2 a, vec2 b){
+  float s = keep(a.x + b.x);
+  float v = keep(s - a.x);
+  float e = (a.x - keep(s - v)) + (b.x - v) + a.y + b.y;
+  return vec2(s, e);
+}
+vec2 dfMul(vec2 a, vec2 b){
+  float p = keep(a.x * b.x);
+  vec2 as = split(a.x), bs = split(b.x);
+  float e = ((as.x * bs.x - p) + as.x * bs.y + as.y * bs.x) + as.y * bs.y;
+  e += a.x * b.y + a.y * b.x;
+  return vec2(p, e);
+}
+
+vec3 palette(float t){
+  vec3 a, b, c, d;
+  if (uPalette == 0)      { a = vec3(.5);           b = vec3(.5);           c = vec3(1.);            d = vec3(0., .1, .2); }
+  else if (uPalette == 1) { a = vec3(.2, .3, .5);   b = vec3(.4, .3, .5);   c = vec3(1., 1., 1.);    d = vec3(.2, .4, .6); }
+  else if (uPalette == 2) { a = vec3(.5);           b = vec3(.5);           c = vec3(1.);            d = vec3(0.); }
+  else                    { a = vec3(.5, .35, .2); b = vec3(.5, .4, .3);    c = vec3(1., .9, .8);    d = vec3(.1, .2, .3); }
+  return a + b * cos(6.2831853 * (c * t + d));
+}
+
+vec3 shade(float m, float iter, float mag2){
+  // Interior: near-black but tinted by the palette, so a frame that is mostly
+  // interior at high depth still reads as a solid shape, not a dead canvas.
+  if (iter >= float(uMaxIter)) return palette(uShift + 0.5) * 0.06;
+  float nu = log2(max(log2(max(mag2, 1.0001)), 1e-6));
+  return palette((m + 1.0 - nu) * 0.14 + uShift);
+}
+
+void main(){
+  vec2 uv = (gl_FragCoord.xy / uRes) * 2.0 - 1.0;
+  uv.x *= uAspect;
+  float m = 0.0, mag2 = 0.0;
+
+  if (uDeep == 0) {
+    vec2 c = uCenter + uv * uScale;
+    vec2 z = vec2(0.0);
+    for (int i = 0; i < 4000; i++) {
+      if (i >= uMaxIter) break;
+      float a = z.x * z.x, b = z.y * z.y;
+      mag2 = a + b;
+      if (mag2 > 4.0) break;
+      z = vec2(a - b, 2.0 * z.x * z.y) + c;
+      m += 1.0;
+    }
+  } else {
+    // Offset in plain float32 (its own relative error is far below a pixel);
+    // only the sum with the center needs the double-float pair.
+    vec2 cr = dfAdd(vec2(uCenter.x, uCenterLo.x), vec2(uv.x * uScale, 0.0));
+    vec2 ci = dfAdd(vec2(uCenter.y, uCenterLo.y), vec2(uv.y * uScale, 0.0));
+    vec2 zr = vec2(0.0), zi = vec2(0.0);
+    for (int i = 0; i < 4000; i++) {
+      if (i >= uMaxIter) break;
+      float a = zr.x * zr.x, b = zi.x * zi.x;
+      mag2 = a + b;
+      if (mag2 > 4.0) break;
+      // z^2 = (zr+zi)(zr-zi) + 2*zr*zi*i, so the low word of both squares
+      // survives; feeding back the rounded float a-b diverges by iter ~100.
+      vec2 p = dfMul(zr, zi);
+      // zr^2 - zi^2 as (zr+zi)(zr-zi), exact for both squares at once.
+      vec2 d = dfMul(dfAdd(vec2(zr.x, 2.0 * zr.y), zi), dfAdd(zr, vec2(-zi.x, -zi.y)));
+      zi = dfAdd(dfAdd(p, p), ci);
+      zr = dfAdd(d, cr);
+      m += 1.0;
+    }
+  }
+  fragColor = vec4(mod(m,256.0)/255.0, mod(floor(m/256.0),256.0)/255.0, floor(m/65536.0)/255.0, 1.0);
+}`;
+
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    const log = gl.getShaderInfoLog(s);
+    const e = document.getElementById("err");
+    e.hidden = false;
+    e.textContent = "Shader compile failed: " + log;
+    throw new Error(log);
+  }
+  return s;
+}
+
+const prog = gl.createProgram();
+gl.attachShader(prog, compile(gl.VERTEX_SHADER, VERT));
+gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FRAG));
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+
+const U = {};
+for (const n of ["uRes","uCenter","uCenterLo","uScale","uAspect","uMaxIter","uShift","uPalette","uDeep"])
+  U[n] = gl.getUniformLocation(prog, n);
+
+// --- state ---------------------------------------------------------------
+// The df pair is two float32s: ~1e-14 relative, so detail dies below ~1e-8.
+// Stopping at 1e-7 keeps every reachable frame real instead of mush.
+const MIN_SCALE = window.MIN_SCALE = 1e-7;
+const SITES = [
+  // seahorse valley is 60% interior at 1e-7 and reads as flat; the others are
+  // all exterior and keep detail at the floor
+  [-0.7746806106269039, -0.137416885603787],
+  [-0.743643887037151, 0.13182590420533],
+  [ 0.292,             0.0148],            // elephant valley
+  [-0.7269,            0.1889],            // san marco
+  [-0.16,              1.0405],            // spiral
+  [-1.25066,           0.02012],
+  [-0.7453,            0.1127],            // double spiral
+  [-0.1011,            0.9563],            // south spiral
+  [ 0.360240443437614, -0.641313061064803],
+];
+
+const S = window.S = {
+  cx: -0.6, cy: 0, scale: 1.2,
+  iter: 128, speed: 1, shift: 0.25, palette: 0,
+  playing: false, deep: 0,
+};
+
+let tx = S.cx, ty = S.cy;          // autoplay focus
+let legT = 0, legDur = 16, jumpNext = false;
+let lastChange = -1e9, lastFrame = performance.now(), fps = 0;
+
+// --- viewport ------------------------------------------------------------
+let W = 1, H = 1, dpr = 1;
+function resize() {
+  dpr = Math.min(devicePixelRatio || 1, 2);
+  W = Math.max(1, Math.floor(canvas.clientWidth * dpr));
+  H = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+  canvas.width = W; canvas.height = H;
+  gl.viewport(0, 0, W, H);
+  lastChange = performance.now();
+}
+addEventListener("resize", resize);
+
+// --- interaction ---------------------------------------------------------
+function toComplex(px, py) {
+  const x = (px / canvas.clientWidth) * 2 - 1;
+  const y = 1 - (py / canvas.clientHeight) * 2;
+  return [S.cx + x * S.scale * (canvas.clientWidth / canvas.clientHeight), S.cy + y * S.scale];
+}
+
+canvas.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  stop();
+  const [zx, zy] = toComplex(e.clientX, e.clientY);
+  const k = Math.exp(e.deltaY * (e.deltaMode === 1 ? 0.05 : 0.0016));
+  const next = Math.min(8, Math.max(MIN_SCALE, S.scale * k));
+  const r = next / S.scale;
+  S.cx = zx + (S.cx - zx) * r;
+  S.cy = zy + (S.cy - zy) * r;
+  S.scale = next;
+  lastChange = performance.now();
+}, { passive:false });
+
+let drag = null;
+canvas.addEventListener("pointerdown", (e) => {
+  stop();
+  canvas.setPointerCapture(e.pointerId);
+  canvas.classList.add("drag");
+  drag = { x:e.clientX, y:e.clientY, cx:S.cx, cy:S.cy };
+});
+canvas.addEventListener("pointermove", (e) => {
+  if (!drag) return;
+  const h = canvas.clientHeight;
+  S.cx = drag.cx - (e.clientX - drag.x) * 2 * S.scale / h;
+  S.cy = drag.cy + (e.clientY - drag.y) * 2 * S.scale / h;
+  lastChange = performance.now();
+});
+const endDrag = () => { drag = null; canvas.classList.remove("drag"); };
+canvas.addEventListener("pointerup", endDrag);
+canvas.addEventListener("pointercancel", endDrag);
+
+canvas.addEventListener("dblclick", (e) => {
+  stop();
+  const [zx, zy] = toComplex(e.clientX, e.clientY);
+  S.cx = zx; S.cy = zy; S.scale *= 0.35;
+  lastChange = performance.now();
+});
+
+// --- autoplay ------------------------------------------------------------
+function randomInView() {
+  const asp = canvas.clientWidth / canvas.clientHeight;
+  return [S.cx + (Math.random() - 0.5) * S.scale * asp * 1.1,
+          S.cy + (Math.random() - 0.5) * S.scale * 1.1];
+}
+
+function nextLeg() {
+  legT = 0;
+  if (jumpNext) {
+    const [sx, sy] = SITES[(Math.random() * SITES.length) | 0];
+    // start part-way in: the bare site is a blue field, the detail is close in
+    S.cx = sx; S.cy = sy; S.scale = 0.004;
+    tx = sx + (Math.random() - 0.5) * 2e-4;
+    ty = sy + (Math.random() - 0.5) * 2e-4;
+  } else {
+    [tx, ty] = randomInView();
+  }
+  jumpNext = !jumpNext;
+}
+
+function stop() {
+  if (!S.playing) return;
+  S.playing = false;
+  document.getElementById("b-play").setAttribute("aria-pressed", "false");
+  document.getElementById("b-play").textContent = "Play";
+}
+
+// --- render --------------------------------------------------------------
+function frame(now) {
+  const dt = Math.min(0.1, (now - lastFrame) / 1000);
+  lastFrame = now;
+  fps += ((1 / Math.max(dt, 1e-3)) - fps) * 0.08;
+
+  if (S.playing) {
+    legT += dt;
+    if (legT > legDur) nextLeg();
+    const e = 1 - Math.exp(-dt * 0.9);
+    S.cx += (tx - S.cx) * e;
+    S.cy += (ty - S.cy) * e;
+    S.scale = Math.max(MIN_SCALE, S.scale * Math.exp(-S.speed * dt * 0.6));
+    // once the floor is reached, sit there for the last stretch instead of
+    // grinding into mush and then snapping out on the next leg
+    if (S.scale <= MIN_SCALE) legT = Math.max(legT, legDur - 3);
+    if (S.shift > 0) S.shift = (S.shift + dt * 0.02) % 1;
+    lastChange = now;
+  }
+
+  // Progressive: half-res while moving, oversampled once the view settles.
+  const still = now - lastChange;
+  const quality = still < 220 ? 0.55 : still < 700 ? 1 : 1.6;
+  const rw = Math.max(1, Math.floor(W * quality));
+  const rh = Math.max(1, Math.floor(H * quality));
+  if (canvas.width !== rw || canvas.height !== rh) {
+    canvas.width = rw; canvas.height = rh;
+    gl.viewport(0, 0, rw, rh);
+  }
+
+  const depth = Math.max(0, -Math.log10(S.scale));
+  // Interior pixels need far more iterations as zoom deepens, or every pixel
+  // hits the cap and the frame renders one flat colour.
+  const maxIter = Math.min(4000, Math.round(S.iter * Math.max(1, 2.5 * Math.pow(depth, 1.4))));
+
+  S.deep = S.scale < 1e-4 ? 1 : 0;
+  const hi = Math.fround(S.cx), lo = S.cx - hi;
+  const hiY = Math.fround(S.cy), loY = S.cy - hiY;
+
+  gl.uniform2f(U.uRes, rw, rh);
+  gl.uniform2f(U.uCenter, hi, hiY);
+  gl.uniform2f(U.uCenterLo, lo, loY);
+  gl.uniform1f(U.uScale, S.scale);
+  gl.uniform1f(U.uAspect, canvas.clientWidth / canvas.clientHeight);
+  gl.uniform1i(U.uMaxIter, maxIter);
+  gl.uniform1f(U.uShift, S.shift);
+  gl.uniform1i(U.uPalette, S.palette);
+  gl.uniform1i(U.uDeep, S.deep);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  const z = 1.4 / S.scale;
+  document.getElementById("h-zoom").textContent =
+    z < 1000 ? z.toFixed(1) + "×" : z.toExponential(1).replace("e+", "e");
+  document.getElementById("h-center").textContent =
+    S.cx.toFixed(S.scale < 1e-6 ? 15 : 7) + ", " + S.cy.toFixed(S.scale < 1e-6 ? 15 : 7);
+  document.getElementById("h-iter").textContent = maxIter;
+  document.getElementById("h-fps").textContent = Math.round(fps);
+
+  requestAnimationFrame(frame);
+}
+
+// --- controls ------------------------------------------------------------
+const $ = (id) => document.getElementById(id);
+function bindSlider(id, out, key, fmt) {
+  const el = $(id);
+  el.addEventListener("input", () => {
+    S[key] = parseFloat(el.value);
+    $(out).textContent = fmt(S[key]);
+    lastChange = performance.now();
+  });
+}
+bindSlider("s-iter", "o-iter", "iter", (v) => v | 0);
+bindSlider("s-speed", "o-speed", "speed", (v) => v.toFixed(1) + "×");
+bindSlider("s-shift", "o-shift", "shift", (v) => v.toFixed(2));
+
+for (const b of document.querySelectorAll("#swatch button")) {
+  b.addEventListener("click", () => {
+    S.palette = +b.dataset.p;
+    for (const o of document.querySelectorAll("#swatch button"))
+      o.setAttribute("aria-pressed", String(o === b));
+    lastChange = performance.now();
+  });
+}
+
+$("b-play").addEventListener("click", () => {
+  S.playing = !S.playing;
+  $("b-play").setAttribute("aria-pressed", String(S.playing));
+  $("b-play").textContent = S.playing ? "Pause" : "Play";
+  if (S.playing) { legT = legDur; lastChange = performance.now(); }
+});
+
+$("b-jump").addEventListener("click", () => {
+  const wasPlaying = S.playing;
+  S.playing = false;
+  nextLeg();
+  if (wasPlaying) S.playing = true;
+  lastChange = performance.now();
+});
+
+$("b-reset").addEventListener("click", () => {
+  stop();
+  S.cx = -0.6; S.cy = 0; S.scale = 1.2;
+  lastChange = performance.now();
+});
+
+$("b-full").addEventListener("click", () => {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else document.documentElement.requestFullscreen?.();
+});
+
+$("b-hide").addEventListener("click", () => {
+  $("panel").hidden = !$("panel").hidden;
+  $("hud").hidden = $("panel").hidden;
+});
+
+addEventListener("keydown", (e) => {
+  if (e.target.tagName === "INPUT") return;
+  const k = e.key.toLowerCase();
+  if (k === " ") { e.preventDefault(); $("b-play").click(); }
+  else if (k === "h") $("b-hide").click();
+  else if (k === "r") $("b-reset").click();
+  else if (k === "n") $("b-jump").click();
+  else if (k === "f") $("b-full").click();
+});
+
+// Self-check: the df64 split must be exact, and dfAdd must carry a pixel step
+// that is under half an ULP of the centre (the case deep zoom lives in).
+for (const v of [0.1, -0.743643887037151, 1e-9, 3.14159265358979]) {
+  console.assert(Math.fround(v) + (v - Math.fround(v)) === v, "df split inexact", v);
+}
+{
+  const bits = (x) => new Int32Array(new Float32Array([x]).buffer)[0];
+  const fromBits = (i) => new Float32Array(new Int32Array([i]).buffer)[0];
+  const keep = (x) => fromBits(bits(x));
+  const dfAdd = (ah, al, bh) => {
+    const s = keep(ah + bh), v = keep(s - ah);
+    return [s, (ah - keep(s - v)) + (bh - v) + al];
+  };
+  const cx = -0.743643887037151, hi = Math.fround(cx), step = 1.25e-8;
+  const [s, e] = dfAdd(hi, cx - hi, Math.fround(step));
+  console.assert(Math.abs(s + e - (cx + step)) < step / 2, "dfAdd lost a sub-ULP step");
+}
+
+resize();
+requestAnimationFrame(frame);
+</script>
+<script>
+const _h=(location.hash||"#-0.743643887037151,0.13182590420533,1e-7").slice(1).split(",");
+S.cx=+_h[0];S.cy=+_h[1];S.scale=+_h[2];lastChange=-1e9;S.playing=false;
+</script>
+<script>
+const cc=document.getElementById("c"),gg=cc.getContext("webgl2");const orig=WebGL2RenderingContext.prototype.drawArrays;let d=0;
+WebGL2RenderingContext.prototype.drawArrays=function(){const r=orig.apply(this,arguments);++d;try{
+const px=new Uint8Array(cc.width*cc.height*4);gg.readPixels(0,0,cc.width,cc.height,gg.RGBA,gg.UNSIGNED_BYTE,px);
+const row=[];for(let gy=0;gy<cc.height;gy+=Math.floor(cc.height/8))for(let gx=0;gx<cc.width;gx+=Math.floor(cc.width/8)){const i=(gy*cc.width+gx)*4;row.push(px[i]+px[i+1]*256+px[i+2]*65536);}
+document.title="w"+cc.width+" "+row.join(",");}catch(e){document.title="E"+e}return r;};
+</script></body>
+</html>
