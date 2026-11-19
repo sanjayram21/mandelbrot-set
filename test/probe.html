@@ -1,42 +1,22 @@
 <!doctype html><meta charset=utf-8><title>probe</title><body>
-<!-- Renders index.html at #cx,cy,scale and dumps framebuffer stats into <title>.
-     readPixels runs inside the page's own rAF because preserveDrawingBuffer is off.
-     Usage: chrome --headless --dump-dom "http://127.0.0.1:8080/test/probe.html#cx,cy,scale" -->
-<iframe id="f" width="400" height="300" style="border:0"></iframe>
+<iframe id=f width=100 height=80 style="border:0" src="/index.html"></iframe>
 <script>
-const [cx, cy, scale] = (location.hash.slice(1) || "-0.743643887037151,0.13182590420533,1e-7")
+const [cx, cy, scale] = (location.hash.slice(1) || "-0.743643887037151,0.13182590420533,1e-5")
   .split(",").map(Number);
-const f = document.getElementById("f");
-f.src = "/index.html";
-f.onload = () => {
-  const w = f.contentWindow, S = w.S;
-  S.cx = cx; S.cy = cy; S.scale = scale;
-  w.lastChange = -1e9;
-  const c = f.contentDocument.getElementById("c");
-  const gl = c.getContext("webgl2");
-  let n = 0;
+let n = 0;
+setTimeout(() => {
+  const w = f.contentWindow;
+  w.S.cx = cx; w.S.cy = cy; w.S.scale = scale;
+  const c = f.contentDocument.getElementById("c"), g = c.getContext("webgl2");
   const raf = w.requestAnimationFrame.bind(w);
   w.requestAnimationFrame = (cb) => raf((t) => {
-    cb(t);
-    if (++n < 4) return;
-    const W = c.width, H = c.height;
-    const px = new Uint8Array(W * H * 4);
-    gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, px);
-    const seen = new Set();
-    let sum = 0, sum2 = 0, dark = 0;
-    for (let i = 0; i < px.length; i += 4) {
-      const v = px[i] + px[i + 1] + px[i + 2];
-      seen.add(px[i] << 16 | px[i + 1] << 8 | px[i + 2]);
-      sum += v; sum2 += v * v;
-      if (v < 12) dark++;
-    }
-    const N = px.length / 4, mean = sum / N;
-    document.title = JSON.stringify({
-      scale: S.scale, deep: S.deep, w: W, h: H,
-      colors: seen.size, mean: +(mean / 3).toFixed(1),
-      sd: +(Math.sqrt(sum2 / N - mean * mean) / 3).toFixed(1),
-      darkPct: +(100 * dark / N).toFixed(1),
-    });
+    cb(t); n++;
+    if (n < 2) return;
+    const px = new Uint8Array(c.width * c.height * 4);
+    g.readPixels(0, 0, c.width, c.height, g.RGBA, g.UNSIGNED_BYTE, px);
+    const s = new Set();
+    for (let i = 0; i < px.length; i += 4) s.add(px[i] + "," + px[i + 1] + "," + px[i + 2]);
+    document.title = "colors=" + s.size + " w=" + c.width + " vp=" + g.getParameter(g.VIEWPORT)[2];
   });
-};
+}, 2000);
 </script>

@@ -132,6 +132,8 @@ uniform int   uMaxIter;
 uniform float uShift;
 uniform int   uPalette;
 uniform int   uDeep;
+uniform vec4  uView;        // drawn rect in canvas fractions, top-down: x, y, w, h
+uniform vec2  uOrigin;      // viewport origin in device pixels (gl_FragCoord space)
 
 const float SPLIT = 4097.0;  // unused by the mask split, kept for reference
 
@@ -180,7 +182,11 @@ vec3 shade(float m, float iter, float mag2){
 }
 
 void main(){
-  vec2 uv = (gl_FragCoord.xy / uRes) * 2.0 - 1.0;
+  // gl_FragCoord is window-based, so the viewport origin comes off first, then
+  // the pixel maps into the rect being drawn. y is flipped: canvas runs down.
+  vec2 local = (gl_FragCoord.xy - uOrigin) / uRes;
+  vec2 frac = uView.xy + local * uView.zw;
+  vec2 uv = vec2(frac.x * 2.0 - 1.0, 1.0 - frac.y * 2.0);
   uv.x *= uAspect;
   float m = 0.0, mag2 = 0.0;
 
@@ -245,7 +251,7 @@ if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgram
 gl.useProgram(prog);
 
 const U = {};
-for (const n of ["uRes","uCenter","uCenterLo","uScale","uAspect","uMaxIter","uShift","uPalette","uDeep"])
+for (const n of ["uRes","uCenter","uCenterLo","uScale","uAspect","uMaxIter","uShift","uPalette","uDeep","uView","uOrigin"])
   U[n] = gl.getUniformLocation(prog, n);
 
 // --- state ---------------------------------------------------------------
@@ -276,6 +282,42 @@ const S = window.S = {
 let tx = S.cx, ty = S.cy;          // autoplay focus
 let legT = 0, legDur = 16, jumpNext = false;
 let lastChange = -1e9, lastFrame = performance.now(), fps = 0;
+
+// --- tiles ---------------------------------------------------------------
+// The view is covered by frustum-interior tiles, coarse first, fine once the
+// view settles. Work is capped per frame and dropped when the camera changes.
+const TILE = 32;      // canvas pixels per tile edge at quality 1
+let layer = { sig: "", items: [], quality: 0, covered: false };
+
+// Tiles overlapping the view only, at one level. Level 2 tiles are 128 px and
+// are what a stale press uses, so covering the canvas early stays cheap.
+function tilesFor(level) {
+  const q = TILE << level;
+  const out = [];
+  for (let x = 0; x < W; x += q)
+    for (let y = 0; y < H; y += q) {
+      const w = Math.min(q, W - x), h = Math.min(q, H - y);
+      out.push({ x, y, w, h });
+    }
+  // Nearest first: the middle of the view settles before the edges.
+  const mx = W / 2, my = H / 2;
+  out.sort((a, b) => (Math.hypot(b.x + b.w / 2 - mx, b.y + b.h / 2 - my) -
+                      Math.hypot(a.x + a.w / 2 - mx, a.y + a.h / 2 - my)));
+  out.reverse();  // consumed with pop()
+  return out;
+}
+
+function drawLayer(tiles) {
+  for (const t of tiles) {
+    gl.viewport(t.x, t.y, t.w, t.h);
+    // y up: the shader's screen y needs the canvas flipped
+    // uniform origin is top-down; the shader's y is up, so flip it
+    gl.uniform2f(U.uOrigin, t.x, t.y);
+    gl.uniform4f(U.uView, t.x / W, t.y / H, t.w / W, t.h / H);
+    gl.uniform2f(U.uRes, t.w, t.h);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+}
 
 // --- viewport ------------------------------------------------------------
 let W = 1, H = 1, dpr = 1;
@@ -382,14 +424,14 @@ function frame(now) {
     lastChange = now;
   }
 
-  // Progressive: half-res while moving, oversampled once the view settles.
+  // Pixel budget. Moving gets a coarse pass; settling refines it in tiles. The
+  // canvas is resized once per layer, never per tile.
   const still = now - lastChange;
-  const quality = still < 220 ? 0.55 : still < 700 ? 1 : 1.6;
-  const rw = Math.max(1, Math.floor(W * quality));
-  const rh = Math.max(1, Math.floor(H * quality));
-  if (canvas.width !== rw || canvas.height !== rh) {
-    canvas.width = rw; canvas.height = rh;
-    gl.viewport(0, 0, rw, rh);
+  const quality = still < 220 ? 0.4 : still < 700 ? 1 : 1.6;
+  const covered = layer.covered;
+  if (canvas.width !== W || canvas.height !== H) {
+    canvas.width = W; canvas.height = H;
+    gl.viewport(0, 0, W, H);
   }
 
   const depth = Math.max(0, -Math.log10(S.scale));
@@ -401,7 +443,6 @@ function frame(now) {
   const hi = Math.fround(S.cx), lo = S.cx - hi;
   const hiY = Math.fround(S.cy), loY = S.cy - hiY;
 
-  gl.uniform2f(U.uRes, rw, rh);
   gl.uniform2f(U.uCenter, hi, hiY);
   gl.uniform2f(U.uCenterLo, lo, loY);
   gl.uniform1f(U.uScale, S.scale);
@@ -410,8 +451,60 @@ function frame(now) {
   gl.uniform1f(U.uShift, S.shift);
   gl.uniform1i(U.uPalette, S.palette);
   gl.uniform1i(U.uDeep, S.deep);
-  gl.drawArrays(gl.TRIANGLES, 0, 3);
 
+  // Cancel: geometry only, so a settled layer's fine tiles survive panning too.
+  // Quality is a layer property, so the whole layer is rebuilt when either it or
+  // the geometry changes; queued tiles from the old one are dropped.
+  const sig = [S.cx, S.cy, S.scale, S.shift, S.palette, S.iter, W, H, S.playing].join();
+  if (sig !== layer.sig || quality !== layer.quality) {
+    layer = { sig, quality, items: [], covered: false, scale: 0 };
+  }
+
+  // A zoom can only get here with a stale layer: cover the canvas at once from
+  // the un-pressed tile grid so it never flashes the previous depth, then skip
+  // the fine pass this frame.
+  if (!layer.covered && (S.scale < layer.scale || !layer.scale)) {
+    drawLayer(tilesFor(2));
+    layer.covered = true;
+    layer.scale = S.scale;
+    hud(maxIter);
+    requestAnimationFrame(frame);
+    return;
+  }
+  layer.scale = S.scale;
+
+  if (!layer.items.length) layer.items = tilesFor(quality >= 1.6 ? 0 : quality >= 1 ? 1 : 2);
+
+  // Budget: one full canvas of tiles per frame, then yield. Tiles are whole, so
+  // a frame does at least one and never more than a screenful.
+  let spent = 0;
+  const budget = W * H;
+  while (layer.items.length && spent < budget) {
+    const t = layer.items.pop();
+    drawLayer([t]);
+    spent += t.w * t.h;
+  }
+
+  // Moving: blow up the previous frame at a wider scale, so a zoom draws inward
+  // instead of flashing the old depth. Only the canvas area stays valid.
+  if (still < 150 && quality < 1) {
+    const s = Math.max(S.scale, MIN_SCALE * Math.exp((1 - still / 150) * 3));
+    const k = S.scale / s;
+    gl.uniform1f(U.uScale, s);
+    gl.viewport(0, 0, W, H);
+    gl.uniform2f(U.uOrigin, 0, 0);
+    gl.uniform2f(U.uRes, W, H);
+    // same pixels, drawn smaller: only the k*k centre of it is on screen
+    gl.uniform4f(U.uView, (1 - k) / 2, (1 - k) / 2, k, k);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.uniform1f(U.uScale, S.scale);
+  }
+
+  hud(maxIter);
+  requestAnimationFrame(frame);
+}
+
+function hud(maxIter) {
   const z = 1.4 / S.scale;
   document.getElementById("h-zoom").textContent =
     z < 1000 ? z.toFixed(1) + "×" : z.toExponential(1).replace("e+", "e");
@@ -419,8 +512,6 @@ function frame(now) {
     S.cx.toFixed(S.scale < 1e-5 ? 15 : 7) + ", " + S.cy.toFixed(S.scale < 1e-5 ? 15 : 7);
   document.getElementById("h-iter").textContent = maxIter;
   document.getElementById("h-fps").textContent = Math.round(fps);
-
-  requestAnimationFrame(frame);
 }
 
 // --- controls ------------------------------------------------------------

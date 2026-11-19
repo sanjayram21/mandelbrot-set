@@ -13,6 +13,17 @@ colours in a 256x192 frame at the seahorse site: 1468 at 1e-6, 1464 at 1e-7,
 lines and scores a JS mirror against a BigInt orbit; it fails on either bug
 reintroduced. `test/selfcheck.html` runs it, `test/smoke.js` still passes.
 
+## Step 1 — done (2026-11-19)
+
+Tiled scheduler: a fixed pixel budget, coarse-first, cancel on any camera change
+via a geometry signature, whole-tile granularity, nearest-the-centre first. The
+shader takes the drawn rect so one shader serves a full draw and a tile draw, and
+tiles are clamped to the view, so only visible pixels are ever iterated.
+
+Verified: self-check and smoke pass; 1e-5 renders fully painted with continuous
+structure and no seams; 1e-7 paints edge to edge where the old build left black
+voids, though its detail is still df64-limited until step 3.
+
 ## State before step 0 (measured, 2026-11-19)
 
 `index.html` at commit `3d93d40`. Clamped at `MIN_SCALE = 1e-7`; flat well before it.
