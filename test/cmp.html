@@ -1,0 +1,32 @@
+<!doctype html><title>cmp</title><body><script>
+// Colour-histogram fingerprint of one view, for comparing two builds. A change
+// that is meant to be invisible must give the same numbers.
+//   #cx,cy,scale,src
+// The backbuffer is not preserved, so the read happens inside the frame callback.
+const [cx, cy, scale, src] = (location.hash.slice(1) || "-0.743643887037151,0.13182590420533,1e-5,/index.html").split(",");
+const f = document.createElement("iframe"); f.width = 96; f.height = 72; f.src = src;
+document.body.append(f);
+let tries = 0, done = false;
+setTimeout(() => {
+  const w = f.contentWindow;
+  w.S.cx = +cx; w.S.cy = +cy; w.S.scale = +scale;
+  const c = f.contentDocument.getElementById("c"), g = c.getContext("webgl2");
+  const raf = w.requestAnimationFrame.bind(w);
+  w.requestAnimationFrame = (cb) => raf((t) => {
+    cb(t);
+    if (done) return;
+    if (!w.eval("layer.covered && !layer.items.length")) return;
+    if (++tries < 2) return;  // one frame of slack after the queue drains
+    done = true;
+    const px = new Uint8Array(c.width * c.height * 4);
+    g.readPixels(0, 0, c.width, c.height, g.RGBA, g.UNSIGNED_BYTE, px);
+    const h = new Map();
+    for (let i = 0; i < px.length; i += 4) {
+      const k = px[i] + "," + px[i + 1] + "," + px[i + 2];
+      h.set(k, (h.get(k) || 0) + 1);
+    }
+    const top = [...h].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([k, v]) => k + ":" + v).join(" ");
+    document.title = "cmp: colors=" + h.size + " " + top;
+  });
+}, 2500);
+</script>

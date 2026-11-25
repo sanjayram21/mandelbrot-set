@@ -192,12 +192,39 @@ void main(){
 
   if (uDeep == 0) {
     vec2 c = uCenter + uv * uScale;
+    // Interior dropout, Myers' periodicity check. After iterating, z equals z_0:
+    // an orbit that returns to a former point is periodic, so it never leaves
+    // and the pixel is interior. Successive points are at most |z|^2 + 4 apart,
+    // so a bounded orbit must repeat within a handful of steps and a 12-slot
+    // ring is enough; the buffer is robbed in order, so a slot is replaced 12
+    // iterations later. The tolerance is 0: two float32 points either repeat
+    // exactly or did not. A refill by c would cost a double-float add per
+    // iteration for depth the shallow loop never reaches; plain c is exact to
+    // the pixel.
+    // The mark counts passes of the ring, not iterations: bumping it every
+    // iteration leaves a slot live for one iteration only and nothing ever hits.
+    // It starts at 1 so the zeroed buffer cannot match iteration 0.
     vec2 z = vec2(0.0);
+    vec3 g[12];    // x = the mark it belongs to, yz = the point
+    float mark = 1.0;
+    int victim = 0;
+    // GLSL locals are not zeroed: garbage in g[k].x can equal mark at iteration
+    // 0 (z = 0,0) and drop out every pixel. The JS mirror uses a zeroed typed
+    // array, so only the shader shows it.
+    for (int k = 0; k < 12; k++) g[k] = vec3(0.0);
     for (int i = 0; i < 4000; i++) {
       if (i >= uMaxIter) break;
       float a = z.x * z.x, b = z.y * z.y;
       mag2 = a + b;
       if (mag2 > 4.0) break;
+      bool hit = false;
+      for (int k = 0; k < 12; k++) {
+        vec3 s = g[k];
+        if (s.x == mark && z.x == s.y && z.y == s.z) hit = true;
+      }
+      if (hit) { m = float(uMaxIter); break; }
+      g[victim] = vec3(mark, z.x, z.y);
+      if (++victim == 12) { victim = 0; mark = mark == 255.0 ? 1.0 : mark + 1.0; }
       z = vec2(a - b, 2.0 * z.x * z.y) + c;
       m += 1.0;
     }
@@ -207,6 +234,15 @@ void main(){
     vec2 cr = dfAdd(vec2(uCenter.x, uCenterLo.x), vec2(uv.x * uScale, 0.0));
     vec2 ci = dfAdd(vec2(uCenter.y, uCenterLo.y), vec2(uv.y * uScale, 0.0));
     vec2 zr = vec2(0.0), zi = vec2(0.0);
+    // Same dropout, compared on the hi words only. A pair that repeats differs
+    // in the low word by the step's rounding, so the pair compare fires later
+    // (measured: 897 iterations to a hit against 496 on the hi word alone). A
+    // neighbour is a whole step further apart, which the hi word does resolve;
+    // the escape test still needs both words because it compares to 4.0.
+    vec3 g[12];
+    float mark = 1.0;
+    int victim = 0;
+    for (int k = 0; k < 12; k++) g[k] = vec3(0.0);  // see the shallow branch
     for (int i = 0; i < 4000; i++) {
       if (i >= uMaxIter) break;
       // Escape on the full pair: the hi word alone repeats across neighbours and
@@ -214,6 +250,14 @@ void main(){
       // the right float32 magnitude in that range.
       mag2 = (zr.x + zr.y) * (zr.x + zr.y) + (zi.x + zi.y) * (zi.x + zi.y);
       if (mag2 > 4.0) break;
+      bool hit = false;
+      for (int k = 0; k < 12; k++) {
+        vec3 s = g[k];
+        if (int(s.x) == int(mark) && zr.x == s.y && zi.x == s.z) hit = true;
+      }
+      if (hit) { m = float(uMaxIter); break; }
+      g[victim] = vec3(mark, zr.x, zi.x);
+      if (++victim == 12) { victim = 0; mark = mark == 255.0 ? 1.0 : mark + 1.0; }
       // z^2 = (zr+zi)(zr-zi) + 2*zr*zi*i, so the low word of both squares
       // survives; feeding back the rounded float a-b diverges by iter ~100.
       vec2 p = dfMul(zr, zi);

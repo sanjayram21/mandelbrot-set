@@ -24,6 +24,27 @@ Verified: self-check and smoke pass; 1e-5 renders fully painted with continuous
 structure and no seams; 1e-7 paints edge to edge where the old build left black
 voids, though its detail is still df64-limited until step 3.
 
+## Step 2 — done (2026-11-25)
+
+Interior dropout: a 12-slot ring of the last points, compared exactly (hi word
+only in the deep branch). A repeat means the orbit is periodic, so the pixel is
+interior and stops. Measured on JS mirrors: 85% of iterations saved at 1e-3, 66%
+at 1e-6, 42% at 1e-6 deep-branch, and zero escaping pixels stopped early over
+600 boundary pixels at 1e-8/1e-10/1e-12.
+
+Three bugs found on the way, all in the first draft, all now covered:
+
+- The mark was bumped every iteration, so a slot stayed live for one iteration
+  and nothing ever hit. It has to count passes of the ring.
+- The hit branch set `mag2 = 4` and broke without marking the pixel interior, so
+  a dropped pixel was shaded as an escape band. It sets `m = uMaxIter` now.
+- GLSL locals are not zeroed. Garbage in `g[k].x` matched the starting mark at
+  iteration 0 and dropped out every pixel; the JS mirror's zeroed typed array hid
+  it. The ring is explicitly zeroed.
+
+Frames verified against the pre-step build by colour histogram, identical at
+1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8 and the shallow default view.
+
 ## State before step 0 (measured, 2026-11-19)
 
 `index.html` at commit `3d93d40`. Clamped at `MIN_SCALE = 1e-7`; flat well before it.
@@ -83,8 +104,7 @@ scheduler's job.
 1. Scheduler: fixed pixel budget, coarse-first tiles, wall-clock budget, cancel on
    camera change. Lands on the current renderer so later steps get measured
    against a stable frame budget.
-2. Interior dropout: periodicity check; provably interior pixels stop early, tiles
-   marked cheap. Biggest frame-time win at depth.
+2. ~~Interior dropout~~ done: periodicity check; interior pixels stop early.
 3. Perturbation core: BigInt reference on a blob-URL worker, precision
    `24 - log2(pixelStep)`, f32 δ, `δ' = 2Zδ + δ² + δc`, escape on the full pair.
    Debounced, cancelable, previous frame shown while it builds.
