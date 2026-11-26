@@ -45,6 +45,28 @@ Three bugs found on the way, all in the first draft, all now covered:
 Frames verified against the pre-step build by colour histogram, identical at
 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8 and the shallow default view.
 
+## Step 3 — done (2026-11-26)
+
+Perturbation. The pixel follows a reference orbit Z computed once at the centre
+in 200-bit BigInt and uploaded as a float texture; only the offset d is
+iterated, `d' = 2Zd + d^2 + dc`, so the pixel step never has to survive the
+centre's magnitude. The reference is rebuilt only when the centre moves by more
+than a pixel. Past the reference's escape, or once |d| outgrows |Z|, the pixel
+falls back to direct iteration from z.
+
+Escape test is `|Z|^2 + 2(Zr*dr + Zi*di) + |d|^2`, not a float32 sum of the
+pair: at |Z| ~ 3 the sum rounds d away and every pixel escapes on the
+reference's own escape time, flat.
+
+Measured against a 200-bit orbit (`test/perturb.mjs`): exact at 1e-8 and 1e-10,
+1/11 wrong at 1e-8's hardest pixel, 3/11 at 1e-12, 5/11 at 1e-14. Direct df64
+is 11/11 wrong at every one of those. Colours at 1e-8 go 926 -> 1121, at 1e-6
+1069 -> 1336, at 1e-5 1349 -> 1350.
+
+Known limits, both step 4's job: the reference is the centre's own orbit, so a
+pixel that outlives it falls back to df64 and is as flat as before; and the
+fallback is triggered by a size test, not by a chosen reference.
+
 ## State before step 0 (measured, 2026-11-19)
 
 `index.html` at commit `3d93d40`. Clamped at `MIN_SCALE = 1e-7`; flat well before it.
@@ -105,9 +127,8 @@ scheduler's job.
    camera change. Lands on the current renderer so later steps get measured
    against a stable frame budget.
 2. ~~Interior dropout~~ done: periodicity check; interior pixels stop early.
-3. Perturbation core: BigInt reference on a blob-URL worker, precision
-   `24 - log2(pixelStep)`, f32 δ, `δ' = 2Zδ + δ² + δc`, escape on the full pair.
-   Debounced, cancelable, previous frame shown while it builds.
+3. ~~Perturbation core~~ done: BigInt reference in a texture, f32 d,
+   `d' = 2Zd + d² + dc`. Built synchronously, not on a worker.
 4. Reference selection: Newton to a nucleus/Misiurewicz point, reference runs ~40
    iterations past its escape, rebase on `|δ| > |z|`.
 5. Arbitrary-precision camera, then exponent-carrying δ.

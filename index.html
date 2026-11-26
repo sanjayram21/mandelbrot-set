@@ -134,6 +134,8 @@ uniform int   uPalette;
 uniform int   uDeep;
 uniform vec4  uView;        // drawn rect in canvas fractions, top-down: x, y, w, h
 uniform vec2  uOrigin;      // viewport origin in device pixels (gl_FragCoord space)
+uniform sampler2D uRef;     // reference orbit, one texel per iteration: rg = Z, ba = dc
+uniform int   uRefLen;      // stored iterations; past this the pixel iterates directly
 
 const float SPLIT = 4097.0;  // unused by the mask split, kept for reference
 
@@ -154,6 +156,7 @@ vec2 dfAdd(vec2 a, vec2 b){
   float e = (a.x - keep(s - v)) + (b.x - v) + a.y + b.y;
   return vec2(s, e);
 }
+vec2 dfSub(vec2 a, vec2 b){ return dfAdd(a, vec2(-b.x, -b.y)); }
 vec2 dfMul(vec2 a, vec2 b){
   float p = keep(a.x * b.x);
   vec2 as = split(a.x), bs = split(b.x);
@@ -229,26 +232,32 @@ void main(){
       m += 1.0;
     }
   } else {
-    // Offset in plain float32 (its own relative error is far below a pixel);
-    // only the sum with the center needs the double-float pair.
-    vec2 cr = dfAdd(vec2(uCenter.x, uCenterLo.x), vec2(uv.x * uScale, 0.0));
-    vec2 ci = dfAdd(vec2(uCenter.y, uCenterLo.y), vec2(uv.y * uScale, 0.0));
+    // Perturbation. The pixel is Z + d for a reference Z from the texture; only
+    // d is iterated, so the pixel step never has to survive the centre's
+    // magnitude. d is the pixel's offset from the centre (Z carries the centre
+    // itself), and dc is that same offset as the constant term.
+    vec2 dcr = vec2(uv.x * uScale, 0.0);
+    vec2 dci = vec2(uv.y * uScale, 0.0);
+    vec2 dr = dcr, di = dci;
     vec2 zr = vec2(0.0), zi = vec2(0.0);
-    // Same dropout, compared on the hi words only. A pair that repeats differs
-    // in the low word by the step's rounding, so the pair compare fires later
-    // (measured: 897 iterations to a hit against 496 on the hi word alone). A
-    // neighbour is a whole step further apart, which the hi word does resolve;
-    // the escape test still needs both words because it compares to 4.0.
+    // Same dropout as the shallow branch, on the hi words. A pair that repeats
+    // differs in the low word by the step's rounding, so the pair compare fires
+    // later (measured: 897 iterations to a hit against 496 on the hi word
+    // alone); a neighbour is a whole step further apart, which the hi word does
+    // resolve. The escape test still needs both words because it compares to 4.
     vec3 g[12];
     float mark = 1.0;
     int victim = 0;
     for (int k = 0; k < 12; k++) g[k] = vec3(0.0);  // see the shallow branch
     for (int i = 0; i < 4000; i++) {
       if (i >= uMaxIter) break;
-      // Escape on the full pair: the hi word alone repeats across neighbours and
-      // the frame flattens. (hi + lo) collapses to hi once |z| is large, which is
-      // the right float32 magnitude in that range.
-      mag2 = (zr.x + zr.y) * (zr.x + zr.y) + (zi.x + zi.y) * (zi.x + zi.y);
+      vec4 Z = texelFetch(uRef, ivec2(i, 0), 0);
+      zr = dfAdd(Z.xy, dr);
+      zi = dfAdd(Z.zw, di);
+      // |Z + d|^2 expanded: |Z|^2 + 2(Zr*dr + Zi*di) + |d|^2. The cross term is
+      // what carries d: at |Z| ~ 3 a float32 sum of the pair rounds d away and
+      // every pixel escapes on the reference's own escape time, flat.
+      mag2 = dot(Z.xy, Z.xy) + 2.0 * (Z.x * dr.x + Z.z * di.x) + dot(dr, dr);
       if (mag2 > 4.0) break;
       bool hit = false;
       for (int k = 0; k < 12; k++) {
@@ -258,15 +267,32 @@ void main(){
       if (hit) { m = float(uMaxIter); break; }
       g[victim] = vec3(mark, zr.x, zi.x);
       if (++victim == 12) { victim = 0; mark = mark == 255.0 ? 1.0 : mark + 1.0; }
-      // z^2 = (zr+zi)(zr-zi) + 2*zr*zi*i, so the low word of both squares
-      // survives; feeding back the rounded float a-b diverges by iter ~100.
-      vec2 p = dfMul(zr, zi);
-      // zr^2 - zi^2 as (zr+zi)(zr-zi), exact for both squares at once. dfAdd
-      // takes both words, so pass zr itself -- not vec2(zr.x, 2.0*zr.y), which
-      // doubles the low word (the 2.0 belongs to p, not here).
-      vec2 d = dfMul(dfAdd(zr, zi), dfAdd(zr, vec2(-zi.x, -zi.y)));
-      zi = dfAdd(dfAdd(p, p), ci);
-      zr = dfAdd(d, cr);
+      // Past the stored reference, or once d outgrows Z, the sum loses the
+      // pixel. Fall back to direct iteration from z, which is still good there.
+      // Direct iteration needs the full c, not the offset dc.
+      if (i + 1 >= uRefLen || (i > 0 && dot(dr, dr) > max(1e-6, dot(Z.xy, Z.xy)))) {
+        vec2 cr = dfAdd(vec2(uCenter.x, uCenterLo.x), dcr);
+        vec2 ci = dfAdd(vec2(uCenter.y, uCenterLo.y), dci);
+        for (int j = i + 1; j < 4000; j++) {
+          if (j >= uMaxIter) break;
+          mag2 = (zr.x + zr.y) * (zr.x + zr.y) + (zi.x + zi.y) * (zi.x + zi.y);
+          if (mag2 > 4.0) break;
+          vec2 p = dfMul(zr, zi);
+          vec2 q = dfMul(dfAdd(zr, zi), dfAdd(zr, vec2(-zi.x, -zi.y)));
+          zi = dfAdd(dfAdd(p, p), ci);
+          zr = dfAdd(q, cr);
+          m += 1.0;
+        }
+        break;
+      }
+      // d' = 2Zd + d^2 + dc, as a complex multiply: real 2Zr*dr - 2Zi*di + ...,
+      // imag 2Zr*di + 2Zi*dr + ... . 2Z is doubled as a pair, not on the hi word
+      // alone: the low word is what d depends on over thousands of iterations.
+      vec2 tr = dfAdd(Z.xy, Z.xy), ti = dfAdd(Z.zw, Z.zw);
+      vec2 p = dfMul(dr, di);
+      dr = dfAdd(dfAdd(dfSub(dfMul(tr, dr), dfMul(ti, di)),
+                        dfSub(dfMul(dr, dr), dfMul(di, di))), dcr);
+      di = dfAdd(dfAdd(dfAdd(dfMul(tr, di), dfMul(ti, dr)), dfAdd(p, p)), dci);
       m += 1.0;
     }
   }
@@ -295,8 +321,56 @@ if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgram
 gl.useProgram(prog);
 
 const U = {};
-for (const n of ["uRes","uCenter","uCenterLo","uScale","uAspect","uMaxIter","uShift","uPalette","uDeep","uView","uOrigin"])
+for (const n of ["uRes","uCenter","uCenterLo","uScale","uAspect","uMaxIter","uShift","uPalette","uDeep","uView","uOrigin","uRef","uRefLen"])
   U[n] = gl.getUniformLocation(prog, n);
+
+// --- reference orbit -----------------------------------------------------
+// Perturbation: the pixel follows a reference orbit Z computed once at the
+// centre in BigInt, carrying only its offset d. z = Z + d, so d' = 2Zd + d^2 +
+// dc stays small and float32 keeps the pixel. The reference is uploaded as a
+// texture, one texel per iteration (rg = Z, ba = dc), and is rebuilt only when
+// the centre moves by more than a pixel.
+//
+// BigInt at 200 bits is ~4x the ~48 a df64 pair carries, so Z is exact where d
+// is not. The reference runs 40 past its escape; past that the pixel falls back
+// to direct iteration (step 4 replaces the fallback with a chosen reference).
+const REF_MAX = 4096, REF_TAIL = 40, REF_BITS = 200n, REF_ONE = 1n << REF_BITS;
+const refTex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, refTex);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+let ref = { cx: NaN, cy: NaN, len: 0 };
+
+const refBig = (x) => BigInt(Math.round(x * 2 ** 52)) << (REF_BITS - 52n);
+
+function buildRef(cx, cy) {
+  const cxB = refBig(cx), cyB = refBig(cy);
+  const px = new Float32Array(REF_MAX * 4);
+  let zx = 0n, zy = 0n, n = 0;
+  for (; n < REF_MAX; n++) {
+    const hx = Number(zx) / 2 ** 200, hy = Number(zy) / 2 ** 200;
+    px[n * 4] = Math.fround(hx); px[n * 4 + 1] = hx - Math.fround(hx);
+    px[n * 4 + 2] = Math.fround(hy); px[n * 4 + 3] = hy - Math.fround(hy);
+    if (zx * zx + zy * zy > 4n * REF_ONE * REF_ONE) break;
+    const nx = (zx * zx - zy * zy) / REF_ONE + cxB, ny = (2n * zx * zy) / REF_ONE + cyB;
+    zx = nx; zy = ny;
+  }
+  // 40 past escape, in float64: past escape |Z| squares every step and 200-bit
+  // fixed point overflows within ~10. Only the first `esc` are followed: past
+  // the escape |Z| is huge and the pair sum with d loses the pixel.
+  const esc = n;
+  let x = Number(zx) / 2 ** 200, y = Number(zy) / 2 ** 200;
+  for (let k = 0; k < REF_TAIL && n < REF_MAX; k++, n++) {
+    [x, y] = [x * x - y * y + cx, 2 * x * y + cy];
+    px[n * 4] = Math.fround(x); px[n * 4 + 1] = x - Math.fround(x);
+    px[n * 4 + 2] = Math.fround(y); px[n * 4 + 3] = y - Math.fround(y);
+  }
+  gl.bindTexture(gl.TEXTURE_2D, refTex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, REF_MAX, 1, 0, gl.RGBA, gl.FLOAT, px);
+  ref = { cx, cy, len: esc };
+}
 
 // --- state ---------------------------------------------------------------
 // The df pair is two float32s, ~45 usable bits; direct iteration dies at 1e-9.
@@ -495,6 +569,17 @@ function frame(now) {
   gl.uniform1f(U.uShift, S.shift);
   gl.uniform1i(U.uPalette, S.palette);
   gl.uniform1i(U.uDeep, S.deep);
+
+  // The reference is only rebuilt when the centre moves by more than a pixel,
+  // so a pan reuses it and a zoom (which keeps the centre) never rebuilds it.
+  // BigInt is slow enough that rebuilding per frame would stutter.
+  const step = (2 * S.scale) / H;
+  if (S.deep && (!(Math.abs(S.cx - ref.cx) < step) || !(Math.abs(S.cy - ref.cy) < step)))
+    buildRef(S.cx, S.cy);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, refTex);
+  gl.uniform1i(U.uRef, 0);
+  gl.uniform1i(U.uRefLen, ref.len);
 
   // Cancel: geometry only, so a settled layer's fine tiles survive panning too.
   // Quality is a layer property, so the whole layer is rebuilt when either it or
