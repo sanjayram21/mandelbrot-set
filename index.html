@@ -251,7 +251,7 @@ void main(){
     for (int k = 0; k < 12; k++) g[k] = vec3(0.0);  // see the shallow branch
     for (int i = 0; i < 4000; i++) {
       if (i >= uMaxIter) break;
-      vec4 Z = texelFetch(uRef, ivec2(i, 0), 0);
+      vec4 Z = texelFetch(uRef, ivec2(i & 255, i >> 8), 0);
       zr = dfAdd(Z.xy, dr);
       zi = dfAdd(Z.zw, di);
       // |Z + d|^2 expanded: |Z|^2 + 2(Zr*dr + Zi*di) + |d|^2. The cross term is
@@ -334,7 +334,7 @@ for (const n of ["uRes","uCenter","uCenterLo","uScale","uAspect","uMaxIter","uSh
 // BigInt at 200 bits is ~4x the ~48 a df64 pair carries, so Z is exact where d
 // is not. The reference runs 40 past its escape; past that the pixel falls back
 // to direct iteration (step 4 replaces the fallback with a chosen reference).
-const REF_MAX = 4096, REF_TAIL = 40, REF_BITS = 200n, REF_ONE = 1n << REF_BITS;
+const REF_MAX = 4096, REF_W = 256, REF_TAIL = 40, REF_BITS = 200n, REF_ONE = 1n << REF_BITS;
 const refTex = gl.createTexture();
 gl.bindTexture(gl.TEXTURE_2D, refTex);
 gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
@@ -368,7 +368,9 @@ function buildRef(cx, cy) {
     px[n * 4 + 2] = Math.fround(y); px[n * 4 + 3] = y - Math.fround(y);
   }
   gl.bindTexture(gl.TEXTURE_2D, refTex);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, REF_MAX, 1, 0, gl.RGBA, gl.FLOAT, px);
+  // 2D, not a 4096-wide strip: SwiftShader truncates the upload past ~256 texels
+  // on a 1-row float texture and every pixel then follows a zero reference.
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, REF_W, REF_MAX / REF_W, 0, gl.RGBA, gl.FLOAT, px);
   ref = { cx, cy, len: esc };
 }
 
